@@ -1,0 +1,110 @@
+services:
+  # Development overrides for the app service
+  app:
+    build:
+      target: development
+    container_name: geass-app-dev
+    environment:
+      NODE_ENV: development
+      # Enable debug logging
+      DEBUG: 'geass:*'
+      LOG_LEVEL: debug
+    volumes:
+      # Hot reload - bind mount source code
+      - ./src:/app/src:cached
+      - ./test:/app/test:cached
+      - ./tsconfig.json:/app/tsconfig.json:cached
+      - ./tsconfig.build.json:/app/tsconfig.build.json:cached
+      - ./nest-cli.json:/app/nest-cli.json:cached
+      - ./eslint.config.mjs:/app/eslint.config.mjs:cached
+      - ./.prettierrc.json:/app/.prettierrc.json:cached
+      # Exclude node_modules to avoid conflicts
+      - /app/node_modules
+    command: ['pnpm', 'start:dev']
+    ports:
+      - '${APP_PORT:-3000}:3000'
+      - '9229:9229' # Debug port
+    healthcheck:
+      # Disable health check in dev to avoid interrupting debugging
+      disable: true
+
+  # Development database with exposed ports and additional tooling
+  timescale:
+    container_name: geass-timescale-dev
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    environment:
+      # More verbose logging in development
+      POSTGRES_LOG_STATEMENT: all
+      POSTGRES_LOG_MIN_DURATION_STATEMENT: 0
+    volumes:
+      # Inherit volumes from base compose file
+      - timescale_data:/var/lib/postgresql/data
+      - ./docker/timescale/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      # Add development SQL scripts - disabled for Prisma
+      # - ./docker/timescale/dev-data.sql:/docker-entrypoint-initdb.d/02-dev-data.sql
+    command:
+      [
+        'postgres',
+        '-c',
+        'shared_preload_libraries=timescaledb',
+        '-c',
+        'log_statement=all',
+        '-c',
+        'log_min_duration_statement=0',
+        '-c',
+        'log_line_prefix=%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h ',
+        '-c',
+        'log_connections=on',
+        '-c',
+        'log_disconnections=on',
+      ]
+
+  # Redis with development configuration
+  redis:
+    container_name: geass-redis-dev
+    volumes:
+      - ./docker/redis/redis-dev.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  # Optional: Redis Commander for database management in development
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: geass-redis-commander
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: 'local:redis:6379'
+      HTTP_USER: ${REDIS_COMMANDER_USER:-admin}
+      HTTP_PASSWORD: ${REDIS_COMMANDER_PASSWORD:-admin}
+    ports:
+      - '8081:8081'
+    depends_on:
+      - redis
+    networks:
+      - trading-net
+    profiles:
+      - tools # Only start with: docker-compose --profile tools up
+
+  # Optional: pgAdmin for TimescaleDB management in development
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: geass-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@geass.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - '8080:80'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - timescale
+    networks:
+      - trading-net
+    profiles:
+      - tools # Only start with: docker-compose --profile tools up
+
+volumes:
+  pgadmin_data:
+    driver: local

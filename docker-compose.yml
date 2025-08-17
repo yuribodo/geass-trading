@@ -1,0 +1,114 @@
+services:
+  # TimescaleDB (PostgreSQL with time-series extension)
+  timescale:
+    image: timescale/timescaledb:latest-pg16
+    container_name: geass-timescale
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-geass_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TIMESCALEDB_TELEMETRY: 'off'
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./docker/timescale/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      # - ./docker/timescale/postgresql.conf:/etc/postgresql/postgresql.conf  # Disabled for MVP
+    command:
+      [
+        'postgres',
+        '-c',
+        'shared_preload_libraries=timescaledb',
+        '-c',
+        'max_connections=100',
+        '-c',
+        'shared_buffers=256MB',
+        '-c',
+        'effective_cache_size=1GB',
+        '-c',
+        'maintenance_work_mem=64MB',
+      ]
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-geass_trading}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trading-net
+
+  # Redis for caching and real-time data
+  redis:
+    image: redis:7-alpine
+    container_name: geass-redis
+    restart: unless-stopped
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis_data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trading-net
+
+  # NestJS Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: geass-app
+    restart: unless-stopped
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      # Database
+      POSTGRES_HOST: timescale
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-geass_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@timescale:5432/${POSTGRES_DB:-geass_trading}
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # JWT
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
+      # Database logging
+      DATABASE_LOGGING: ${DATABASE_LOGGING:-false}
+    depends_on:
+      timescale:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3000/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - trading-net
+
+volumes:
+  timescale_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  trading-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
